@@ -235,17 +235,25 @@ elif page == "🗺️ Hotspot Map":
             ax.scatter(sub['center_lon'], sub['center_lat'],
                        c=color, alpha=alpha, s=sizes, label=f'{tier} ({len(sub)})', zorder=int(alpha * 5))
 
-        # Only label top 4 zones, with fixed spaced-out offsets and boxed text to avoid collisions
-        top4 = zones_f.head(4)
-        offsets = [(0.05, 0.045), (0.05, -0.05), (-0.11, 0.07), (0.05, 0.10)]
-        for (_, row), (dx, dy) in zip(top4.iterrows(), offsets):
-            lbl = row['junction_name'].split('-')[-1].strip()[:22] if row['junction_name'] != 'No Junction' else row['police_station'][:22]
+        # Only label top 4 zones. These can sit very close together on the map,
+        # so labels are placed in a vertical stack on the right margin with
+        # straight leader lines — this avoids any label-to-label collision
+        # regardless of how close the underlying coordinates are.
+        top4 = zones_f.head(4).reset_index(drop=True)
+        label_x = 77.74          # fixed column on the right side of the map
+        label_y_start = 13.10
+        label_y_step = 0.028
+        for i, row in top4.iterrows():
+            lbl = row['junction_name'].split('-')[-1].strip()[:24] if row['junction_name'] != 'No Junction' else row['police_station'][:24]
+            ly = label_y_start - i * label_y_step
             ax.annotate(f"#{int(row['rank'])} {lbl}",
                         xy=(row['center_lon'], row['center_lat']),
-                        xytext=(row['center_lon'] + dx, row['center_lat'] + dy),
+                        xytext=(label_x, ly),
                         color='white', fontsize=8.5, fontweight='bold',
+                        ha='left', va='center',
                         bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1d27', edgecolor='#ff4757', linewidth=1, alpha=0.95),
-                        arrowprops=dict(arrowstyle='->', color='#ff4757', lw=1))
+                        arrowprops=dict(arrowstyle='->', color='#ff4757', lw=0.9,
+                                         connectionstyle='arc3,rad=0.08'))
 
         ax.set_xlim(77.40, 77.82)
         ax.set_ylim(12.78, 13.18)
