@@ -357,8 +357,8 @@ elif page == "📋 Enforcement Priority List":
         elif val == 'Medium': return 'background-color: #2d200a; color: #ffa502'
         return 'background-color: #0d2010; color: #2ed573'
 
-    styled = display_df.head(50).style.applymap(color_priority, subset=['Priority'])
-    st.dataframe(styled, use_container_width=True, height=600)
+    styled = display_df.head(50).style.map(color_priority, subset=['Priority'])
+    st.dataframe(styled, width='stretch', height=600)
 
     st.download_button(
         "📥 Download Full Priority List (CSV)",
@@ -431,7 +431,7 @@ elif page == "🔮 Zone Forecaster":
             'Date': [d.strftime('%b %d') for d in future_dates],
             'Predicted': [f"{int(y):,}" for y in future_y]
         })
-        st.dataframe(forecast_tbl, use_container_width=True, hide_index=True)
+        st.dataframe(forecast_tbl, width='stretch', hide_index=True)
 
     st.markdown("---")
     st.markdown("""
