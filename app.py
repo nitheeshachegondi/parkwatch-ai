@@ -61,9 +61,18 @@ def load_data():
     df['day_of_week'] = df['created_datetime'].dt.dayofweek
     df['date'] = pd.to_datetime(df['created_datetime']).dt.date
     df['month'] = df['created_datetime'].dt.month
-    return zones, df
+    try:
+        deployment = pd.read_csv("deployment_recommendations.csv")
+    except FileNotFoundError:
+        deployment = None
+    try:
+        prophet_fc = pd.read_csv("prophet_forecast.csv")
+        prophet_fc['ds'] = pd.to_datetime(prophet_fc['ds'])
+    except FileNotFoundError:
+        prophet_fc = None
+    return zones, df, deployment, prophet_fc
 
-zones, df = load_data()
+zones, df, deployment, prophet_fc = load_data()
 
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────
 st.sidebar.markdown("## 🚦 ParkWatch AI")
@@ -75,6 +84,7 @@ page = st.sidebar.radio("Navigate", [
     "🗺️ Hotspot Map",
     "⏰ Temporal Analysis",
     "📋 Enforcement Priority List",
+    "🚓 Deployment Plan",
     "🔮 Zone Forecaster"
 ])
 
@@ -406,7 +416,75 @@ elif page == "📋 Enforcement Priority List":
         "text/csv"
     )
 
-# ─── PAGE 5: ZONE FORECASTER ─────────────────────────────────────────────────
+# ─── PAGE 5: DEPLOYMENT PLAN ──────────────────────────────────────────────────
+elif page == "🚓 Deployment Plan":
+    st.markdown("# 🚓 Deployment Recommendation Engine")
+    st.markdown("**Auto-generated officer deployment plan for tomorrow's shift**")
+    st.markdown("---")
+
+    if deployment is None:
+        st.warning("Deployment recommendations not found. Run `preprocess.py` to generate `deployment_recommendations.csv`.")
+    else:
+        total_minutes = deployment['est_daily_minutes_recovered'].sum()
+        total_officers = deployment['recommended_officers'].sum()
+        triple_officer_count = len(deployment[deployment['recommended_officers'] == 3])
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(f'<div class="metric-card high"><h3>{total_minutes:,.0f}</h3><p>Est. vehicle-minutes of congestion recoverable per day</p></div>', unsafe_allow_html=True)
+        with c2:
+            st.markdown(f'<div class="metric-card kpi"><h3>{int(total_officers)}</h3><p>Officers recommended across top 50 zones</p></div>', unsafe_allow_html=True)
+        with c3:
+            st.markdown(f'<div class="metric-card med"><h3>{triple_officer_count}</h3><p>Zones requiring 3-officer coverage</p></div>', unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown('<div class="section-title">Tomorrow\'s Deployment Plan — Top 15 Zones</div>', unsafe_allow_html=True)
+
+        for _, row in deployment.head(15).iterrows():
+            tier = row['priority_tier']
+            color = '#ff4757' if tier == 'High' else '#ffa502' if tier == 'Medium' else '#2ed573'
+            name = row['junction_name'].split('-')[-1].strip() if row['junction_name'] != 'No Junction' else row['police_station']
+            st.markdown(f'''
+            <div style="background:#1a1d27; border-left:4px solid {color}; border-radius:8px; padding:14px 18px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
+                <div style="flex:2;">
+                    <strong style="color:white; font-size:1.0rem;">#{int(row["rank"])} {name}</strong>
+                    <span style="color:#888; font-size:0.85rem;"> &nbsp;·&nbsp; {row["police_station"]}</span>
+                </div>
+                <div style="flex:1; text-align:center;">
+                    <span style="color:#aaa; font-size:0.8rem;">PEAK WINDOW</span><br>
+                    <strong style="color:{color};">{row["peak_window"]}</strong>
+                </div>
+                <div style="flex:1; text-align:center;">
+                    <span style="color:#aaa; font-size:0.8rem;">OFFICERS</span><br>
+                    <strong style="color:white;">{int(row["recommended_officers"])}</strong>
+                </div>
+                <div style="flex:1; text-align:center;">
+                    <span style="color:#aaa; font-size:0.8rem;">MIN/DAY RECOVERED</span><br>
+                    <strong style="color:#2ed573;">{row["est_daily_minutes_recovered"]:.0f}</strong>
+                </div>
+            </div>
+            ''', unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown("""
+        <div style="background:#1a1d27; border-left:4px solid #5352ed; padding:14px 18px; border-radius:8px;">
+        <strong style="color:#5352ed">ℹ️ How this is calculated</strong><br>
+        <span style="color:#aaaaaa">
+        <b>Peak window:</b> the 2-hour period with the highest historical violation concentration for that specific zone (not a generic city-wide shift).<br>
+        <b>Officer count:</b> scaled by impact score — 3 officers for score ≥80, 2 for ≥60, 1 otherwise.<br>
+        <b>Minutes recovered:</b> estimated using weighted violations (vehicle-type adjusted) × peak-window concentration × an assumed 1.5 minutes of following-traffic delay per weighted violation. This is a modeling assumption for illustrative impact sizing, not a measured value — presented transparently as such.
+        </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.download_button(
+            "📥 Download Full Deployment Plan (CSV)",
+            deployment.to_csv(index=False).encode(),
+            "deployment_plan.csv",
+            "text/csv"
+        )
+
+# ─── PAGE 6: ZONE FORECASTER ─────────────────────────────────────────────────
 elif page == "🔮 Zone Forecaster":
     st.markdown("# 🔮 Zone Violation Forecaster")
     st.markdown("**Predict enforcement demand for the next 14 days**")
@@ -417,33 +495,53 @@ elif page == "🔮 Zone Forecaster":
     daily = daily.sort_values('date').reset_index(drop=True)
     daily['rolling_7'] = daily['count'].rolling(7, center=True, min_periods=1).mean()
 
-    # Fit forecast on the last 30 days of rolling average for a smoother, more local trend
-    tail_n = min(30, len(daily))
-    tail = daily['rolling_7'].tail(tail_n).reset_index(drop=True)
-    x_tail = np.arange(tail_n)
-    z_coef = np.polyfit(x_tail, tail.values, 1)
-    p = np.poly1d(z_coef)
-    future_y = p(np.arange(tail_n, tail_n + 14))
-    future_dates = pd.date_range(daily['date'].max() + pd.Timedelta(days=1), periods=14)
+    use_prophet = prophet_fc is not None
+    last_idx = len(daily) - 1
+
+    if use_prophet:
+        history = prophet_fc[prophet_fc['ds'] <= daily['date'].max()]
+        future_part = prophet_fc[prophet_fc['ds'] > daily['date'].max()].head(14)
+        future_y = future_part['yhat'].values
+        future_lower = future_part['yhat_lower'].values
+        future_upper = future_part['yhat_upper'].values
+        future_dates = future_part['ds']
+        mape = (np.abs(daily['count'].values - history['yhat'].values[:len(daily)]) / daily['count'].values).mean() * 100
+    else:
+        tail_n = min(30, len(daily))
+        tail = daily['rolling_7'].tail(tail_n).reset_index(drop=True)
+        x_tail = np.arange(tail_n)
+        z_coef = np.polyfit(x_tail, tail.values, 1)
+        p = np.poly1d(z_coef)
+        future_y = p(np.arange(tail_n, tail_n + 14))
+        future_lower = future_y * 0.85
+        future_upper = future_y * 1.15
+        future_dates = pd.date_range(daily['date'].max() + pd.Timedelta(days=1), periods=14)
+        mape = None
 
     col_forecast, col_insight = st.columns([3, 1])
     with col_forecast:
         fig, ax = plt.subplots(figsize=(12, 5.5), facecolor='#0f1117')
         ax.set_facecolor('#1a1d27')
-        last_idx = len(daily) - 1
         ax.fill_between(range(len(daily)), daily['count'], alpha=0.18, color='#5352ed', linewidth=0)
         ax.plot(range(len(daily)), daily['count'], color='#5352ed', alpha=0.4, linewidth=0.7, label='Daily violations')
         ax.plot(range(len(daily)), daily['rolling_7'], color='#ffa502', linewidth=2.2, label='7-day rolling avg')
-        forecast_x = [last_idx] + list(range(last_idx + 1, last_idx + 15))
-        forecast_y = [daily['rolling_7'].iloc[-1]] + list(future_y)
-        ax.plot(forecast_x, forecast_y, color='#ff4757', linewidth=2.2, linestyle='--', label='14-day forecast', zorder=5)
-        ax.axvspan(last_idx, last_idx + 14, alpha=0.07, color='#ff4757')
+
+        forecast_x = list(range(last_idx + 1, last_idx + 1 + len(future_y)))
+        connect_x = [last_idx] + forecast_x
+        connect_y = [daily['rolling_7'].iloc[-1]] + list(future_y)
+        ax.plot(connect_x, connect_y, color='#ff4757', linewidth=2.2, linestyle='--',
+                label='14-day forecast' + (' (Prophet)' if use_prophet else ''), zorder=5)
+        ax.fill_between(forecast_x, future_lower, future_upper, color='#ff4757', alpha=0.15,
+                         label='80% confidence interval', zorder=4)
+        ax.axvspan(last_idx, last_idx + len(future_y), alpha=0.06, color='#ff4757')
+
         xticks = list(np.linspace(0, len(daily) - 1, 5).astype(int))
         ax.set_xticks(xticks)
         ax.set_xticklabels([str(daily['date'].iloc[i].date()) for i in xticks],
                            rotation=15, ha='right', fontsize=8, color='#aaaaaa')
         ax.set_ylabel('Daily Violations', color='#aaaaaa', fontsize=9)
-        ax.set_title('Daily Violation Trend & 14-Day Enforcement Demand Forecast',
+        title_suffix = f' — Prophet model, {mape:.0f}% MAPE' if mape else ''
+        ax.set_title(f'Daily Violation Trend & 14-Day Enforcement Demand Forecast{title_suffix}',
                      color='white', fontsize=11, fontweight='bold', pad=10)
         ax.legend(facecolor='#1a1d27', labelcolor='white', fontsize=9, loc='upper left')
         ax.spines[:].set_visible(False)
@@ -469,22 +567,33 @@ elif page == "🔮 Zone Forecaster":
             <p>Trend vs last 14 days ({change:+.1f}%)</p>
         </div>
         ''', unsafe_allow_html=True)
+        if mape:
+            st.markdown(f'''
+            <div class="metric-card low">
+                <h3>{mape:.1f}%</h3>
+                <p>Model MAPE (lower is better)</p>
+            </div>
+            ''', unsafe_allow_html=True)
 
         st.markdown('<div class="section-title">Forecast by Day</div>', unsafe_allow_html=True)
         forecast_tbl = pd.DataFrame({
-            'Date': [d.strftime('%b %d') for d in future_dates],
+            'Date': [pd.Timestamp(d).strftime('%b %d') for d in future_dates],
             'Predicted': [f"{int(y):,}" for y in future_y]
         })
         st.dataframe(forecast_tbl, width='stretch', hide_index=True)
 
     st.markdown("---")
-    st.markdown("""
+    methodology = (
+        "Forecast uses <b>Prophet</b> (Facebook/Meta's time-series model) with weekly seasonality "
+        "enabled, fitted on 152 days of daily violation counts. The shaded band shows an 80% confidence "
+        f"interval. In-sample MAPE is {mape:.1f}%, reported transparently as a measure of fit quality."
+        if use_prophet else
+        "Forecast uses a linear trend model fitted on the 7-day rolling average of daily violations "
+        "(Prophet not available in this environment \u2014 install via <code>pip install prophet</code> for the full model)."
+    )
+    st.markdown(f"""
     <div style="background:#1a1d27; border-left:4px solid #5352ed; padding:14px 18px; border-radius:8px;">
     <strong style="color:#5352ed">ℹ️ Forecasting Methodology</strong><br>
-    <span style="color:#aaaaaa">
-    Forecast uses a linear trend model fitted on the 7-day rolling average of daily violations. 
-    This captures the underlying enforcement demand signal while smoothing day-of-week seasonality. 
-    Future versions can incorporate Prophet-based seasonal decomposition for improved accuracy.
-    </span>
+    <span style="color:#aaaaaa">{methodology}</span>
     </div>
     """, unsafe_allow_html=True)
